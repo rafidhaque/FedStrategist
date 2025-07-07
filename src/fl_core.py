@@ -7,6 +7,7 @@ from torch.utils.data import DataLoader
 from models import SimpleCNN
 from aggregation import fed_avg, coordinate_wise_median, krum
 from collections import OrderedDict
+from attacks import local_model_poisoning_attack
 
 class Client:
     def __init__(self, client_id, dataset, device):
@@ -49,14 +50,19 @@ class Server:
     def get_global_model_state(self):
         return self.global_model.state_dict()
 
-    def aggregate_updates(self, client_updates, agg_rule):
+    def aggregate_updates(self, client_updates, agg_rule, num_malicious=0):
         if agg_rule not in self.aggregation_fn_map:
             raise ValueError(f"Unknown aggregation rule: {agg_rule}")
         
         aggregation_fn = self.aggregation_fn_map[agg_rule]
-        aggregated_state_dict = aggregation_fn(client_updates)
+        
+        if agg_rule == 'krum':
+            aggregated_state_dict = aggregation_fn(client_updates, num_malicious=num_malicious)
+        else:
+            aggregated_state_dict = aggregation_fn(client_updates)
         
         self.global_model.load_state_dict(aggregated_state_dict)
+
 
     def evaluate(self, test_loader):
         self.global_model.eval()
@@ -72,3 +78,39 @@ class Server:
         
         accuracy = 100 * correct / total
         return accuracy
+
+class MaliciousClient(Client):
+    def __init__(self, client_id, dataset, device):
+        super().__init__(client_id, dataset, device)
+        self.attack_scale_factor = 5.0 # This can be tuned
+
+    def train(self, local_epochs=1):
+        # First, perform a benign training step to get a realistic update direction
+        benign_update = super().train(local_epochs)
+        
+        # Get the global model state it started with
+        # Note: In a real attack, the client would have stored this. Here we simulate.
+        # For simplicity, we assume the benign_update's "starting point" is recoverable.
+        # This is a simplification; more robust code would pass the global state in.
+        # Let's refine this to be more explicit.
+        
+        # The 'train' method in the parent class should not be called directly
+        # Instead, we will pass the global model state to the attack function
+        pass
+
+    def generate_malicious_update(self, global_model_state, local_epochs=1):
+        """
+        A dedicated method for generating the malicious update.
+        """
+        # Step 1: Perform a benign update to find a plausible direction
+        self.set_global_model(global_model_state)
+        benign_update = super().train(local_epochs) # The super().train() now returns the state dict
+        
+        # Step 2: Use the benign update and global state to craft the poisoned update
+        malicious_update = local_model_poisoning_attack(
+            benign_update,
+            global_model_state,
+            scale_factor=self.attack_scale_factor
+        )
+        
+        return malicious_update
