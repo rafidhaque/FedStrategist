@@ -8,6 +8,7 @@ from models import SimpleCNN
 from aggregation import fed_avg, coordinate_wise_median, krum
 from collections import OrderedDict
 from attacks import local_model_poisoning_attack
+from diagnostics import get_update_norms, get_pairwise_cosine_similarity
 
 class Client:
     def __init__(self, client_id, dataset, device):
@@ -40,6 +41,7 @@ class Client:
 class Server:
     def __init__(self, device):
         self.global_model = SimpleCNN().to(device)
+        self.previous_accuracy = 0.0
         self.device = device
         self.aggregation_fn_map = {
             'fed_avg': fed_avg,
@@ -78,6 +80,37 @@ class Server:
         
         accuracy = 100 * correct / total
         return accuracy
+    
+    def compute_state_vector(self, client_updates, current_accuracy):
+        """
+        Computes the state vector S_t based on the latest client updates.
+        
+        Args:
+            client_updates (list): A list of model state_dicts from clients.
+            current_accuracy (float): The accuracy of the global model after aggregation.
+
+        Returns:
+            torch.Tensor: The state vector for the current round.
+        """
+        with torch.no_grad():
+            # Metric 1: Variance of update norms
+            update_norms = get_update_norms(client_updates)
+            norm_variance = torch.var(update_norms).item()
+
+            # Metric 2: Average pairwise cosine similarity
+            avg_cosine_sim = get_pairwise_cosine_similarity(client_updates).item()
+
+            # Metric 3: Change in global model accuracy
+            delta_accuracy = current_accuracy - self.previous_accuracy
+            
+            # Update the stored accuracy for the next round
+            self.previous_accuracy = current_accuracy
+            
+            # Combine metrics into a state vector
+            # Note: The order here is important and must be consistent
+            state_vector = torch.tensor([norm_variance, avg_cosine_sim, delta_accuracy], device=self.device)
+            return state_vector
+
 
 class MaliciousClient(Client):
     def __init__(self, client_id, dataset, device):
@@ -114,3 +147,5 @@ class MaliciousClient(Client):
         )
         
         return malicious_update
+
+    

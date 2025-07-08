@@ -42,10 +42,8 @@ def main(args):
     for round_num in range(args.num_rounds):
         print(f"\n--- Round {round_num + 1}/{args.num_rounds} ---")
         
-        # Get global model from server
         global_model_state = server.get_global_model_state()
         
-        # Train clients and collect updates
         client_updates = []
         for client in clients:
             print(f"Processing client {client.client_id}...", end="")
@@ -60,12 +58,24 @@ def main(args):
                 
             client_updates.append(update)
             
-        # Server aggregates updates
+        # --- NEW: Compute state vector BEFORE aggregation ---
+        # Note: We need to evaluate the model *after* aggregation to get the delta_accuracy.
+        # Let's adjust the flow slightly for this.
+        
+        # First, evaluate the model *before* this round's aggregation
+        # This isn't quite right, let's keep it simple. The server will track its own accuracy.
+        # The logic in the server class handles this correctly.
+        
         print(f"Server aggregating updates using '{args.agg_rule}'...")
-        server.aggregate_updates(client_updates, args.agg_rule, num_malicious=args.num_malicious) # Pass num_malicious to agg
+        server.aggregate_updates(client_updates, args.agg_rule, num_malicious=args.num_malicious)
         
         # Evaluate global model
         accuracy = server.evaluate(test_loader)
+        
+        # --- NEW: Compute and log the state vector ---
+        state_vector = server.compute_state_vector(client_updates, accuracy)
+        print(f"State Vector S_t: {state_vector.tolist()}") # .tolist() for clean printing
+        
         print(f"Round {round_num + 1} Global Model Accuracy: {accuracy:.2f}%")
 
 if __name__ == '__main__':
