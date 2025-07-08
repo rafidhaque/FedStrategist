@@ -11,6 +11,8 @@ from attacks import local_model_poisoning_attack
 from diagnostics import get_update_norms, get_pairwise_cosine_similarity
 from bandit import LinUCB
 import numpy as np
+from attacks import local_model_poisoning_attack, stealth_poisoning_attack
+
 
 class Client:
     def __init__(self, client_id, dataset, device):
@@ -129,39 +131,34 @@ class Server:
 
 
 class MaliciousClient(Client):
-    def __init__(self, client_id, dataset, device):
+    def __init__(self, client_id, dataset, device, attack_type='standard'):
         super().__init__(client_id, dataset, device)
-        self.attack_scale_factor = 5.0 # This can be tuned
+        self.attack_scale_factor = 5.0 # For the standard attack
+        self.attack_type = attack_type
 
-    def train(self, local_epochs=1):
-        # First, perform a benign training step to get a realistic update direction
-        benign_update = super().train(local_epochs)
-        
-        # Get the global model state it started with
-        # Note: In a real attack, the client would have stored this. Here we simulate.
-        # For simplicity, we assume the benign_update's "starting point" is recoverable.
-        # This is a simplification; more robust code would pass the global state in.
-        # Let's refine this to be more explicit.
-        
-        # The 'train' method in the parent class should not be called directly
-        # Instead, we will pass the global model state to the attack function
-        pass
-
-    def generate_malicious_update(self, global_model_state, local_epochs=1):
+    def generate_malicious_update(self, global_model_state, local_epochs=1, benign_avg_norm=None):
         """
-        A dedicated method for generating the malicious update.
+        Generates a malicious update based on the configured attack type.
         """
-        # Step 1: Perform a benign update to find a plausible direction
+        # Step 1: Perform a benign update to find a plausible malicious direction
         self.set_global_model(global_model_state)
-        benign_update = super().train(local_epochs) # The super().train() now returns the state dict
+        initial_malicious_update = super().train(local_epochs=local_epochs)
         
-        # Step 2: Use the benign update and global state to craft the poisoned update
-        malicious_update = local_model_poisoning_attack(
-            benign_update,
-            global_model_state,
-            scale_factor=self.attack_scale_factor
-        )
-        
-        return malicious_update
-
+        # Step 2: Craft the final attack
+        if self.attack_type == 'stealth' and benign_avg_norm is not None:
+            # Use the stealth attack that matches the norm of benign clients
+            final_malicious_update = stealth_poisoning_attack(
+                initial_malicious_update,
+                global_model_state,
+                target_norm=benign_avg_norm
+            )
+        else:
+            # Default to the standard, naive scaling attack
+            final_malicious_update = local_model_poisoning_attack(
+                initial_malicious_update,
+                global_model_state,
+                scale_factor=self.attack_scale_factor
+            )
+            
+        return final_malicious_update
     
