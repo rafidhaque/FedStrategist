@@ -9,6 +9,7 @@ from torch.utils.data import DataLoader
 from utils import load_data, create_non_iid_partitions
 from fl_core import Server, Client, MaliciousClient
 from diagnostics import get_update_norms
+from attacks import generate_malicious_direction # Add this line
 
 def main(args):
     # --- Setup ---
@@ -54,29 +55,45 @@ def main(args):
         
         global_model_state = server.get_global_model_state()
         
-        # --- Separate benign and malicious training ---
+
+        # --- Separate benign and malicious client processing ---
         benign_updates = []
-        # First, process benign clients to establish a baseline
-        for client in clients:
-            if not isinstance(client, MaliciousClient):
-                client.set_global_model(global_model_state)
-                update = client.train(local_epochs=args.local_epochs)
-                benign_updates.append(update)
-        
-        # Calculate the average norm of benign updates for the stealth attack
-        avg_benign_norm = torch.mean(get_update_norms(benign_updates)).item() if benign_updates else 0
-
         malicious_updates = []
-        for client in clients:
-             if isinstance(client, MaliciousClient):
-                update = client.generate_malicious_update(global_model_state, args.local_epochs, avg_benign_norm)
-                malicious_updates.append(update)
 
-        # Combine all updates for aggregation and diagnostics
-        client_updates = benign_updates + malicious_updates
+        # We need to process benign clients first to get the target norm for the stealth attack
+        benign_clients = [c for c in clients if not isinstance(c, MaliciousClient)]
+        malicious_clients = [c for c in clients if isinstance(c, MaliciousClient)]
+
+
+        # Process benign clients first
+        for client in benign_clients:
+            client.set_global_model(global_model_state)
+            update = client.train(local_epochs=args.local_epochs)
+            benign_updates.append(update)
+
+
+        # Calculate the average norm of benign updates' directions for the stealth attack
+        avg_benign_norm = 0
+        if benign_updates:
+            with torch.no_grad():
+                # We calculate the norm of the *update vector* (update - global), not the full state dict
+                benign_directions = [generate_malicious_direction(up, global_model_state) for up in benign_updates]
+                benign_norms = [torch.norm(d, p=2) for d in benign_directions]
+                if benign_norms:
+                    avg_benign_norm = torch.mean(torch.stack(benign_norms)).item()
+
         
-        pre_agg_accuracy = server.evaluate(test_loader)
+        # Process malicious clients using the calculated norm
+        for client in malicious_clients:
+            print(f"  Client {client.client_id}: Generating {args.attack_type} attack.")
+            update = client.get_malicious_update(global_model_state, args.local_epochs, avg_benign_norm)
+            malicious_updates.append(update)
 
+        # Combine all updates for the server
+        client_updates = benign_updates + malicious_updates
+
+        pre_agg_accuracy = server.evaluate(test_loader)
+        
         current_state_vector = server.compute_state_vector(client_updates)
         print(f"State Vector S_t: {current_state_vector.cpu().numpy().round(4)}")
         
@@ -111,6 +128,8 @@ def main(args):
         }
         results_log.append(round_data)
 
+    
+    
     # --- Save final results ---
     df = pd.DataFrame(results_log)
     df.to_csv(log_path, index=False)

@@ -7,11 +7,10 @@ from torch.utils.data import DataLoader
 from models import SimpleCNN
 from aggregation import fed_avg, coordinate_wise_median, krum
 from collections import OrderedDict
-from attacks import local_model_poisoning_attack
 from diagnostics import get_update_norms, get_pairwise_cosine_similarity
 from bandit import LinUCB
 import numpy as np
-from attacks import local_model_poisoning_attack, stealth_poisoning_attack
+from attacks import generate_malicious_direction, standard_poisoning_attack, stealth_poisoning_attack
 
 
 class Client:
@@ -133,32 +132,23 @@ class Server:
 class MaliciousClient(Client):
     def __init__(self, client_id, dataset, device, attack_type='standard'):
         super().__init__(client_id, dataset, device)
-        self.attack_scale_factor = 5.0 # For the standard attack
         self.attack_type = attack_type
 
-    def generate_malicious_update(self, global_model_state, local_epochs=1, benign_avg_norm=None):
+    def get_malicious_update(self, global_model_state, local_epochs=1, benign_avg_norm=None):
         """
-        Generates a malicious update based on the configured attack type.
+        This is now the single method for this class. It computes and returns
+        the appropriate malicious update.
         """
-        # Step 1: Perform a benign update to find a plausible malicious direction
+        # Step 1: Perform a benign update to find a plausible malicious direction.
+        # This is the "base" for the attack.
         self.set_global_model(global_model_state)
-        initial_malicious_update = super().train(local_epochs=local_epochs)
+        benign_update = super().train(local_epochs=local_epochs)
         
-        # Step 2: Craft the final attack
+        # Step 2: Extract the direction vector from this benign update.
+        malicious_direction = generate_malicious_direction(benign_update, global_model_state)
+        
+        # Step 3: Use the appropriate attack function to generate the final update.
         if self.attack_type == 'stealth' and benign_avg_norm is not None:
-            # Use the stealth attack that matches the norm of benign clients
-            final_malicious_update = stealth_poisoning_attack(
-                initial_malicious_update,
-                global_model_state,
-                target_norm=benign_avg_norm
-            )
-        else:
-            # Default to the standard, naive scaling attack
-            final_malicious_update = local_model_poisoning_attack(
-                initial_malicious_update,
-                global_model_state,
-                scale_factor=self.attack_scale_factor
-            )
-            
-        return final_malicious_update
-    
+            return stealth_poisoning_attack(malicious_direction, global_model_state, benign_avg_norm)
+        else: # Default to standard attack
+            return standard_poisoning_attack(malicious_direction, global_model_state)
