@@ -99,3 +99,6 @@ if __name__ == '__main__':
         raise ValueError("Number of malicious clients cannot be greater than or equal to the total number of clients.")
         
     main(args)
+
+# RUN THIS SCRIPT:
+# python main.py --agg_rule=adaptive --num_clients=20 --num_malicious=5 --num_rounds=10
