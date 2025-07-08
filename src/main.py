@@ -21,7 +21,9 @@ def main(args):
         os.makedirs(args.results_dir)
 
     # Set run name for logging
-    run_name = f"rule={args.agg_rule}_clients={args.num_clients}_malicious={args.num_malicious}_beta={args.beta}_seed={args.seed}"
+    run_name = f"rule={args.agg_rule}_clients={args.num_clients}_malicious={args.num_malicious}_beta={args.beta}_seed={args.seed}_attack={args.attack_type}"
+    if args.agg_rule == 'adaptive':
+        run_name += f"_lambda={args.lambda_cost}"
     log_path = os.path.join(args.results_dir, f"{run_name}.csv")
     print(f"Logging results to: {log_path}")
     
