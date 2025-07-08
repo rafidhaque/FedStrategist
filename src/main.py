@@ -1,27 +1,39 @@
-# --- File: main.py ---
+# --- File: main.py (Final Version with Logging) ---
 
 import argparse
 import torch
+import os
+import pandas as pd
+import numpy as np
 from torch.utils.data import DataLoader
 from utils import load_data, create_non_iid_partitions
 from fl_core import Server, Client, MaliciousClient
 
-
 def main(args):
-    # Set device
+    # --- Setup ---
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    # Load data
-    trainset, testset = load_data()
+    # Create results directory if it doesn't exist
+    if not os.path.exists(args.results_dir):
+        os.makedirs(args.results_dir)
 
-    # Create non-IID partitions
-    print(f"Creating {args.num_clients} non-IID partitions with beta={args.beta}...")
-    client_datasets = create_non_iid_partitions(trainset, args.num_clients, args.beta)
-
-    # Initialize server and clients
-    server = Server(device, args.num_clients) # Pass num_clients
+    # Set run name for logging
+    run_name = f"rule={args.agg_rule}_clients={args.num_clients}_malicious={args.num_malicious}_beta={args.beta}_seed={args.seed}"
+    log_path = os.path.join(args.results_dir, f"{run_name}.csv")
+    print(f"Logging results to: {log_path}")
     
+    # Set seed for reproducibility
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
+
+    # --- Data and Model Setup ---
+    trainset, testset = load_data()
+    client_datasets = create_non_iid_partitions(trainset, args.num_clients, args.beta)
+    test_loader = DataLoader(testset, batch_size=128)
+
+    # --- Initialize Server and Clients ---
+    server = Server(device, args.num_clients)
     clients = []
     # Benign clients
     for i in range(args.num_clients - args.num_malicious):
@@ -32,8 +44,9 @@ def main(args):
 
     print(f"Initialized {len(clients)} total clients ({args.num_malicious} malicious).")
 
-    test_loader = DataLoader(testset, batch_size=64)
-
+    # --- Logging Setup ---
+    results_log = []
+    
     # --- Federated Learning Loop ---
     for round_num in range(args.num_rounds):
         print(f"\n--- Round {round_num + 1}/{args.num_rounds} ---")
@@ -49,56 +62,58 @@ def main(args):
                 update = client.train(local_epochs=args.local_epochs)
             client_updates.append(update)
             
-        # Evaluate accuracy *before* aggregation to calculate delta
         pre_agg_accuracy = server.evaluate(test_loader)
         
-        # --- COMMANDER LOGIC ---
-        # Compute state vector based on the updates received
-        # Note: We compute state before aggregation, but reward after
         current_state_vector = server.compute_state_vector(client_updates)
-        # The state vector is on the GPU, but the bandit expects a numpy array.
-        # We must move it to the CPU first before converting.
-        current_state_numpy = current_state_vector.cpu().numpy()
-        print(f"State Vector S_t: {current_state_numpy.round(4)}")
+        print(f"State Vector S_t: {current_state_vector.cpu().numpy().round(4)}")
         
         chosen_rule_str = args.agg_rule
+        action_idx = -1 # Default for non-adaptive
         if args.agg_rule == 'adaptive':
-            # Ask the bandit to choose an action
-            action_idx = server.bandit.choose_action(current_state_numpy)
+            action_idx = server.bandit.choose_action(current_state_vector.cpu().numpy())
             chosen_rule_str = server.agg_rules[action_idx]
             print(f"Bandit chose action: {chosen_rule_str}")
         
-        # Server aggregates updates
         server.aggregate_updates(client_updates, chosen_rule_str, num_malicious=args.num_malicious)
         
-        # Evaluate global model *after* aggregation
         post_agg_accuracy = server.evaluate(test_loader)
         print(f"Round {round_num + 1} Global Model Accuracy: {post_agg_accuracy:.2f}%")
         
-        # --- UPDATE BANDIT ---
+        reward = 0.0
         if args.agg_rule == 'adaptive':
             delta_accuracy = post_agg_accuracy - pre_agg_accuracy
             reward = server.calculate_reward(delta_accuracy, chosen_rule_str, args.lambda_cost)
             print(f"  Delta Acc: {delta_accuracy:.2f}, Cost: {server.agg_costs.get(chosen_rule_str, 0):.2f}, Reward: {reward:.4f}")
-            server.bandit.update(action_idx, current_state_numpy, reward)
+            server.bandit.update(action_idx, current_state_vector.cpu().numpy(), reward)
+
+        # Log results for this round
+        round_data = {
+            'round': round_num + 1,
+            'agg_rule': chosen_rule_str,
+            'accuracy': post_agg_accuracy,
+            'reward': reward,
+            'state_norm_var': current_state_vector[0].item(),
+            'state_cosine_sim': current_state_vector[1].item(),
+            'state_mean_norm': current_state_vector[2].item(),
+        }
+        results_log.append(round_data)
+
+    # --- Save final results ---
+    df = pd.DataFrame(results_log)
+    df.to_csv(log_path, index=False)
+    print(f"\nResults saved to {log_path}")
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Federated Learning Simulation')
-    # ... existing args ...
-    parser.add_argument('--num_clients', type=int, default=10, help='Number of clients')
-    parser.add_argument('--num_rounds', type=int, default=10, help='Number of communication rounds')
-    parser.add_argument('--local_epochs', type=int, default=1, help='Number of local epochs for each client')
-    parser.add_argument('--beta', type=float, default=0.5, help='Dirichlet distribution beta parameter for non-IID data')
-    parser.add_argument('--agg_rule', type=str, default='fed_avg', choices=['fed_avg', 'median', 'krum', 'adaptive'], help='Aggregation rule to use')
-    parser.add_argument('--num_malicious', type=int, default=0, help='Number of malicious clients')
-    parser.add_argument('--lambda_cost', type=float, default=0.5, help='Weight of the cost in the reward function for the bandit')
+    parser.add_argument('--num_clients', type=int, default=20)
+    parser.add_argument('--num_rounds', type=int, default=50)
+    parser.add_argument('--local_epochs', type=int, default=1)
+    parser.add_argument('--beta', type=float, default=0.5, help='Controls non-IIDness')
+    parser.add_argument('--agg_rule', type=str, default='adaptive', choices=['fed_avg', 'median', 'krum', 'adaptive'])
+    parser.add_argument('--num_malicious', type=int, default=5, help='Number of malicious clients')
+    parser.add_argument('--lambda_cost', type=float, default=0.5, help='Cost weight for bandit reward')
+    parser.add_argument('--results_dir', type=str, default='results', help='Directory to save results')
+    parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility')
     
     args = parser.parse_args()
-    
-    if args.num_malicious >= args.num_clients:
-        raise ValueError("Number of malicious clients cannot be greater than or equal to the total number of clients.")
-        
     main(args)
-
-# RUN THIS SCRIPT:
-# python main.py --agg_rule=adaptive --num_clients=20 --num_malicious=5 --num_rounds=10
