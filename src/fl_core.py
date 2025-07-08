@@ -9,6 +9,8 @@ from aggregation import fed_avg, coordinate_wise_median, krum
 from collections import OrderedDict
 from attacks import local_model_poisoning_attack
 from diagnostics import get_update_norms, get_pairwise_cosine_similarity
+from bandit import LinUCB
+import numpy as np
 
 class Client:
     def __init__(self, client_id, dataset, device):
@@ -81,35 +83,49 @@ class Server:
         accuracy = 100 * correct / total
         return accuracy
     
-    def compute_state_vector(self, client_updates, current_accuracy):
+    def compute_state_vector(self, client_updates): # No longer needs accuracy
         """
         Computes the state vector S_t based on the latest client updates.
-        
-        Args:
-            client_updates (list): A list of model state_dicts from clients.
-            current_accuracy (float): The accuracy of the global model after aggregation.
-
-        Returns:
-            torch.Tensor: The state vector for the current round.
+        The 'delta_accuracy' component is removed as it's part of the reward, not the state.
         """
         with torch.no_grad():
-            # Metric 1: Variance of update norms
             update_norms = get_update_norms(client_updates)
             norm_variance = torch.var(update_norms).item()
 
-            # Metric 2: Average pairwise cosine similarity
             avg_cosine_sim = get_pairwise_cosine_similarity(client_updates).item()
-
-            # Metric 3: Change in global model accuracy
-            delta_accuracy = current_accuracy - self.previous_accuracy
             
-            # Update the stored accuracy for the next round
-            self.previous_accuracy = current_accuracy
+            # New Metric: We can add the norm of the mean update as a third feature
+            mean_update_norm = torch.norm(get_update_norms([fed_avg(client_updates)])).item()
             
-            # Combine metrics into a state vector
-            # Note: The order here is important and must be consistent
-            state_vector = torch.tensor([norm_variance, avg_cosine_sim, delta_accuracy], device=self.device)
+            state_vector = torch.tensor([norm_variance, avg_cosine_sim, mean_update_norm], device=self.device)
             return state_vector
+
+    
+    def __init__(self, device, num_clients): # Add num_clients
+        self.global_model = SimpleCNN().to(device)
+        self.device = device
+        self.aggregation_fn_map = {
+            'fed_avg': fed_avg,
+            'median': coordinate_wise_median,
+            'krum': krum
+        }
+        self.agg_rules = list(self.aggregation_fn_map.keys()) # Ordered list of rules
+        self.previous_accuracy = 0.0
+        
+        # Initialize the bandit agent
+        # d=3 for our 3 state metrics, num_actions for our 3 rules
+        self.bandit = LinUCB(num_actions=len(self.agg_rules), d=3, alpha=1.5)
+        
+        # Heuristic costs for each aggregation rule
+        self.agg_costs = {'fed_avg': 0.1, 'median': 0.4, 'krum': 0.8}
+
+    # Add a new method to the Server class to calculate reward
+    def calculate_reward(self, delta_accuracy, chosen_rule, lambda_cost=0.5):
+        """Calculates the reward for the bandit."""
+        cost = self.agg_costs.get(chosen_rule, 0.0)
+        reward = delta_accuracy - (lambda_cost * cost)
+        return reward
+
 
 
 class MaliciousClient(Client):
